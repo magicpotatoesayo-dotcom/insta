@@ -1,0 +1,8 @@
+requests
+httpx[http2]
+h2
+cfonts
+telethon
+pyfiglet
+rich
+bs4
