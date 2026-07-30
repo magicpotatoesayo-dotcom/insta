@@ -45,8 +45,8 @@ def banner():
 banner()
 
 # Fetch inputs from Render Environment Variables
-token = os.environ.get("6746587815:AAHBufzR0LXNq_n3bt6hlQU8k2c7ykLMD48")
-ID = os.environ.get("5379040566")
+token = os.environ.get("BOT_TOKEN")
+ID = os.environ.get("CHAT_ID")
 
 if not token or not ID:
     print("Error: BOT_TOKEN or CHAT_ID environment variables are not set!")
