@@ -31,33 +31,36 @@ def install_dependencies():
     try:
         from cfonts import render
     except ImportError:
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "requests telethon pyfiglet rich cfonts bs4"])
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "cfonts==1.5.2"])
         from cfonts import render
 
-install_dependencies()
+# Install dependencies
+try:
+    install_dependencies()
+except Exception as e:
+    logger.warning(f"Some dependencies failed: {e}")
 
 # Create Flask app for web service
 app = Flask(__name__)
 
-# Colors and formatting
-b = random.randint(5,208)
-bo = f'\x1b[38;5;{b}m'
-ED = '\x1b[38;5;208m'
-BLUE = '\033[94m'
-Z = '\033[1;31m' 
-YELLOW = '\033[1;33m' 
-O = '\033[2;31m' 
-F = '\033[2;32m' 
-A = '\033[2;34m'
-C = '\033[2;35m' 
-M = '\033[2;36m'
-Y = '\033[1;34m' 
-B = "\033[1;30m" 
-R = "\033[1;31m" 
-G = "\033[1;32m" 
-W = "\033[1;37m" 
-J = '\033[2;36m'
-N = '\033[1;37m'
+# Colors and formatting - Simplified version that won't break
+class Colors:
+    ED = '\033[38;5;208m'
+    BLUE = '\033[94m'
+    Z = '\033[1;31m'
+    YELLOW = '\033[1;33m'
+    O = '\033[2;31m'
+    F = '\033[2;32m'
+    A = '\033[2;34m'
+    C = '\033[2;35m'
+    M = '\033[2;36m'
+    Y = '\033[1;34m'
+    B = "\033[1;30m"
+    R = "\033[1;31m"
+    G = "\033[1;32m"
+    W = "\033[1;37m"
+    J = '\033[2;36m'
+    N = '\033[1;37m'
 
 # Global variables
 used_usernames = set()
@@ -69,11 +72,18 @@ dead = 0
 is_running = False
 
 def banner():
-    banner_text = f'''{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
-{N}DEV / @sm4ss {J}|
-{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
-'''
-    logger.info(banner_text)
+    try:
+        from cfonts import render
+        output = render('Insta Checker', colors=['red', 'yellow'], align='center')
+        print(output)
+        print("=" * 50)
+        print("DEV / @sm4ss")
+        print("=" * 50)
+    except:
+        print("Insta Checker")
+        print("=" * 50)
+        print("DEV / @sm4ss")
+        print("=" * 50)
 
 # Get token from environment variable
 TOKEN = os.environ.get('BOT_TOKEN', '')
@@ -119,7 +129,7 @@ By || @sm4ss
         with open('hits.txt', 'a') as ff:
             ff.write(f'{msg}\n')
         if TOKEN and CHAT_ID:
-            requests.get(f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={msg}")
+            requests.get(f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={msg}", timeout=5)
     except Exception as e:
         logger.error(f"Error sending message: {e}")
 
@@ -132,7 +142,6 @@ def solve_recaptcha():
             'authority': 'www.google.com',
             'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'accept-language': 'ar-EG,ar;q=0.9,en-US;q=0.8,en;q=0.7',
-            'cookie': '_GRECAPTCHA=09AKhCRwiKbcI7EZjNQFSzLgUCSBS_bUaR2oCM0oi0eG8FYSe2kRId7GR8JP1eBLU-aZl_EhZFXFlAOOTXbmpWU6g',
             'referer': 'https://hi2.in/',
             'sec-ch-ua': '"Chromium";v="139", "Not;A=Brand";v="99"',
             'sec-ch-ua-mobile': '?0',
@@ -160,7 +169,7 @@ def solve_recaptcha():
             "X-Client-Data": "CN2OywE="
         }
         
-        resp = requests.post('https://www.google.com/recaptcha/api2/reload', data=payload, headers=reload_headers)
+        resp = requests.post('https://www.google.com/recaptcha/api2/reload', data=payload, headers=reload_headers, timeout=10)
         if 'resp","' in resp.text:
             return resp.text.split('resp","')[1].split('"')[0]
         return None
@@ -226,9 +235,20 @@ def rest(email):
             'X-IG-App-ID': '936619743392459'
         }
         
-        with httpx.Client(http2=True, timeout=30.0) as client:
-            response = client.post(url, data=payload, headers=headers)
-            
+        # Use httpx with http2 support
+        try:
+            import httpx
+            with httpx.Client(http2=True, timeout=30.0) as client:
+                response = client.post(url, data=payload, headers=headers)
+                
+                if 'email_is_taken' in response.text:
+                    check_email(email)
+                else:
+                    badig += 1
+        except Exception as e:
+            # Fallback to requests if httpx fails
+            logger.warning(f"HTTPX failed, falling back to requests: {e}")
+            response = requests.post(url, data=payload, headers=headers, timeout=30)
             if 'email_is_taken' in response.text:
                 check_email(email)
             else:
@@ -259,13 +279,14 @@ def users():
 @app.route('/')
 def home():
     return jsonify({
-        "status": "running",
+        "status": "running" if is_running else "stopped",
         "hits": hit,
         "bad_ig": badig,
         "bad_mail": badmil,
         "dead": dead,
         "total_checked": hit + badig + badmil + dead,
-        "is_running": is_running
+        "is_running": is_running,
+        "bot_configured": bool(TOKEN and CHAT_ID)
     })
 
 @app.route('/start')
@@ -276,14 +297,16 @@ def start():
         # Start threads
         for _ in range(5):  # Reduced threads for Render free tier
             Thread(target=users, daemon=True).start()
-        return jsonify({"status": "started"})
-    return jsonify({"status": "already running"})
+        return jsonify({"status": "started", "message": "Checker started successfully"})
+    return jsonify({"status": "already running", "message": "Checker is already running"})
 
 @app.route('/stop')
 def stop():
     global is_running
-    is_running = False
-    return jsonify({"status": "stopped"})
+    if is_running:
+        is_running = False
+        return jsonify({"status": "stopped", "message": "Checker stopped"})
+    return jsonify({"status": "not running", "message": "Checker is not running"})
 
 @app.route('/stats')
 def stats():
@@ -292,7 +315,20 @@ def stats():
         "bad_ig": badig,
         "bad_mail": badmil,
         "dead": dead,
-        "total_checked": hit + badig + badmil + dead
+        "total_checked": hit + badig + badmil + dead,
+        "percentage_hit": f"{(hit / (hit + badig + badmil + dead) * 100):.2f}%" if (hit + badig + badmil + dead) > 0 else "0%"
+    })
+
+@app.route('/status')
+def status():
+    return jsonify({
+        "service": "Instagram Email Checker",
+        "version": "1.0.0",
+        "status": "online",
+        "bot_token": "configured" if TOKEN else "not configured",
+        "chat_id": "configured" if CHAT_ID else "not configured",
+        "threads": 5,
+        "is_running": is_running
     })
 
 if __name__ == "__main__":
