@@ -55,7 +55,7 @@ except Exception as e:
 app = Flask(__name__)
 
 # ============ STARTER PLAN OPTIMIZED SETTINGS ============
-THREAD_COUNT = 3  # Optimal for 512MB RAM
+THREAD_COUNT = 10# Optimal for 512MB RAM
 DELAY_BETWEEN_REQUESTS = 0.8  # Reduced with proxies
 MAX_RETRIES = 2
 REQUEST_TIMEOUT = 30
